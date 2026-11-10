@@ -1,0 +1,251 @@
+from pathlib import Path
+
+html = r'''<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>DON'T LOOK BACK — Forest Demo</title>
+<style>
+*{box-sizing:border-box;user-select:none;-webkit-user-select:none;-webkit-touch-callout:none}
+html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#050806;color:#e8eee8;font-family:Arial,sans-serif;touch-action:none}
+canvas{display:block;width:100%;height:100%}
+#hud{position:absolute;top:12px;left:14px;right:14px;display:flex;justify-content:space-between;font:12px monospace;letter-spacing:2px;text-shadow:0 2px 5px #000;pointer-events:none}
+#msg{position:absolute;top:16%;left:5%;width:90%;text-align:center;font:12px monospace;letter-spacing:2px;text-shadow:0 2px 6px #000;pointer-events:none}
+#joystick{position:absolute;left:22px;bottom:20px;width:112px;height:112px;border:2px solid #ffffff55;border-radius:50%;background:#ffffff12;touch-action:none}
+#stick{position:absolute;left:32px;top:32px;width:44px;height:44px;border-radius:50%;background:#ffffff85;border:2px solid #ffffffa0;pointer-events:none}
+#look{position:absolute;right:0;top:0;width:58%;height:75%;touch-action:none}
+#actions{position:absolute;right:18px;bottom:18px;display:flex;gap:9px}
+button{background:#101812dc;color:#e8eee8;border:1px solid #b8c9b855;border-radius:50%;width:62px;height:62px;font-size:10px;letter-spacing:1px;touch-action:none}
+#overlay{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;flex-direction:column;text-align:center;padding:26px;background:radial-gradient(ellipse,#18251cdd,#020503f5)}
+#overlay h1{font-size:clamp(34px,8vw,68px);letter-spacing:8px;margin:0 0 12px;text-shadow:0 0 22px #9ab69a}
+#overlay p{max-width:520px;color:#aeb8af;font:13px/1.7 monospace}
+#start{border-radius:0;width:auto;height:auto;padding:15px 28px;margin-top:18px;background:#dce5dc;color:#0a100b;font-weight:bold}
+#rotate{display:none;position:absolute;inset:0;background:#030604;z-index:9;align-items:center;justify-content:center;text-align:center;font:14px monospace;letter-spacing:3px}
+@media(orientation:portrait){#rotate{display:flex}}
+@media(orientation:landscape){#joystick{width:100px;height:100px}#stick{left:28px;top:28px}button{width:56px;height:56px}}
+</style>
+</head>
+<body>
+<canvas id="c" width="800" height="450"></canvas>
+<div id="hud"><span id="objective">FIND THE CHURCH</span><span id="battery">FLASHLIGHT 100%</span></div>
+<div id="msg">2:17 AM — THE FOREST IS QUIET</div>
+<div id="look"></div>
+<div id="joystick"><div id="stick"></div></div>
+<div id="actions"><button id="light">LIGHT ON</button><button id="sprint">RUN</button><button id="use">USE</button></div>
+<div id="rotate">↻<br><br>TURN YOUR PHONE SIDEWAYS</div>
+<div id="overlay">
+<h1 id="heading">DON'T LOOK BACK</h1>
+<p id="intro">You are alone in the woods.<br>Find the abandoned church. Something is moving between the trees.<br><br>Explore the forest. Listen carefully. Don't trust every sound.</p>
+<button id="start">ENTER THE FOREST</button>
+</div>
+<script>
+(()=>{
+const canvas=document.getElementById('c'),ctx=canvas.getContext('2d'),W=canvas.width,H=canvas.height;
+const TAU=Math.PI*2, FOV=95*Math.PI/180;
+const player={x:0,y:0,a:0.12};
+const church={x:0,y:58};
+let trees=[],rocks=[],parts=[],notes=[];
+let running=false,ended=false,flash=true,battery=100,found=0,hasStarted=false;
+let joy={x:0,y:0},joyId=null,lookId=null,lastX=0,runHeld=false;
+let last=0,stepTimer=0,ambienceTimer=4,msgTimer=0,monsterMode='stalk',modeTimer=7;
+let audio=null,master=null;
+const monster={x:12,y:32,speed:3.15};
+const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
+const dist=(a,b)=>Math.hypot(a.x-b.x,a.y-b.y);
+const rnd=(a,b)=>a+Math.random()*(b-a);
+const norm=a=>Math.atan2(Math.sin(a),Math.cos(a));
+function say(t,s=2.8){document.getElementById('msg').textContent=t;msgTimer=s}
+function initWorld(){
+  trees=[];rocks=[];parts=[];notes=[];
+  // Trees occupy a broad outdoor clearing, with irregular natural spacing.
+  for(let i=0;i<260;i++){
+    let x=rnd(-48,48),y=rnd(5,105);
+    if(Math.hypot(x,y)<5)continue;
+    if(Math.hypot(x-church.x,y-church.y)<7)continue;
+    trees.push({x,y,r:rnd(.34,.68),h:rnd(5.5,9.5),variant:Math.floor(rnd(0,3))});
+  }
+  // A few closer trees frame the player's starting view.
+  for(let i=0;i<18;i++) trees.push({x:rnd(-14,14),y:rnd(7,20),r:rnd(.4,.8),h:rnd(6,10),variant:Math.floor(rnd(0,3))});
+  parts=[{x:-13,y:22,got:false},{x:17,y:43,got:false},{x:-8,y:49,got:false}];
+  notes=[{x:8,y:19,got:false,text:'The footsteps stop whenever I stop.'},{x:-19,y:39,got:false,text:'I saw it standing where the trees were thickest.'}];
+}
+function audioStart(){
+ try{
+  audio=new(window.AudioContext||window.webkitAudioContext)();master=audio.createGain();master.gain.value=.55;master.connect(audio.destination);
+  const o=audio.createOscillator(),g=audio.createGain();o.type='sine';o.frequency.value= forty;g.gain.value=.018;o.connect(g);g.connect(master);o.start();
+ }catch(e){}
+}
+const forty=40;
+function tone(f,d,v=.04,type='sine'){
+ if(!audio)return;const o=audio.createOscillator(),g=audio.createGain();o.type=type;o.frequency.value=f;g.gain.setValueAtTime(v,audio.currentTime);g.gain.exponentialRampToValueAtTime(.001,audio.currentTime+d);o.connect(g);g.connect(master);o.start();o.stop(audio.currentTime+d);
+}
+function rustle(d=.18,v=.035){
+ if(!audio)return;let n=Math.floor(audio.sampleRate*d),b=audio.createBuffer(1,n,audio.sampleRate),a=b.getChannelData(0);for(let i=0;i<n;i++)a[i]=Math.random()*2-1;
+ let s=audio.createBufferSource(),g=audio.createGain();s.buffer=b;g.gain.value=v;s.connect(g);g.connect(master);s.start();
+}
+function blocked(x,y,rad=.45){
+ if(Math.abs(x)>53||y< -3||y>112)return true;
+ for(const t of trees)if(Math.hypot(x-t.x,y-t.y)<t.r+rad)return true;
+ return false;
+}
+function move(dx,dy){
+ if(!blocked(player.x+dx,player.y))player.x+=dx;
+ if(!blocked(player.x,player.y+dy))player.y+=dy;
+}
+function lineBlocked(ax,ay,bx,by){
+ const d=Math.hypot(bx-ax,by-ay),steps=Math.ceil(d/.35);
+ for(let i=1;i<steps;i++){let t=i/steps,x=ax+(bx-ax)*t,y=ay+(by-ay)*t;for(const tr of trees)if(Math.hypot(x-tr.x,y-tr.y)<tr.r*.88)return true;}
+ return false;
+}
+function project(x,y){
+ const dx=x-player.x,dy=y-player.y,d=Math.hypot(dx,dy),a=norm(Math.atan2(dx,dy)-player.a);
+ if(Math.abs(a)>FOV/2+.15||d<.25)return null;
+ const sx=W/2+Math.tan(a)/(Math.tan(FOV/2))*(W/2);
+ return {sx,d,a};
+}
+function drawSkyGround(){
+ let sky=ctx.createLinearGradient(0,0,0,H*.57);sky.addColorStop(0,'#26312d');sky.addColorStop(.7,'#657068');sky.addColorStop(1,'#9aa094');
+ ctx.fillStyle=sky;ctx.fillRect(0,0,W,H*.57);
+ let ground=ctx.createLinearGradient(0,H*.48,0,H);ground.addColorStop(0,'#50584a');ground.addColorStop(.2,'#303b2d');ground.addColorStop(1,'#111a12');ctx.fillStyle=ground;ctx.fillRect(0,H*.48,W,H*.52);
+ // Leaf litter texture
+ for(let i=0;i<1500;i++){let x=Math.random()*W,y=H*.52+Math.random()*H*.48;ctx.fillStyle=Math.random()>.5?'#6e7051':'#202a1d';ctx.globalAlpha=Math.random()*.22;ctx.fillRect(x,y,rnd(1,5),1.5);}ctx.globalAlpha=1;
+}
+function drawTree(t){
+ const p=project(t.x,t.y);if(!p)return;
+ const scale=H/(p.d*1.15),base=H*.53+scale*.14;
+ const trunkW=Math.max(2,t.r*scale*.65),trunkH=t.h*scale*.7;
+ if(base<0||base>H+trunkH)return;
+ // atmospheric depth
+ let alpha=clamp(1-p.d/115,.12,1);
+ ctx.globalAlpha=alpha;
+ ctx.fillStyle='#171e18';ctx.fillRect(p.sx-trunkW/2,base-trunkH,trunkW,trunkH);
+ let crownW=scale*(t.variant===1?1.15:1.55),crownH=scale*(t.variant===2?2.1:1.65);
+ ctx.fillStyle=t.variant===1?'#202d23':'#18271e';
+ ctx.beginPath();ctx.moveTo(p.sx-crownW*.55,base-trunkH*.45);ctx.lineTo(p.sx-crownW*.48,base-trunkH-crownH*.55);ctx.lineTo(p.sx,base-trunkH-crownH);ctx.lineTo(p.sx+crownW*.5,base-trunkH-crownH*.48);ctx.lineTo(p.sx+crownW*.58,base-trunkH*.2);ctx.closePath();ctx.fill();
+ ctx.fillStyle='#334333';ctx.globalAlpha*=.35;ctx.beginPath();ctx.arc(p.sx-crownW*.12,base-trunkH-crownH*.57,crownW*.23,0,TAU);ctx.fill();
+ ctx.globalAlpha=1;
+}
+function drawChurch(){
+ const p=project(church.x,church.y);if(!p)return;
+ const scale=H/(p.d*1.1),w=scale*3.7,h=scale*3.4,x=p.sx;
+ ctx.globalAlpha=clamp(1-p.d/95,.15,1);
+ ctx.fillStyle='#252a24';ctx.fillRect(x-w/2,H*.53-h,w,h);
+ ctx.fillStyle='#171d19';ctx.beginPath();ctx.moveTo(x-w*.62,H*.53-h);ctx.lineTo(x,H*.53-h*1.55);ctx.lineTo(x+w*.62,H*.53-h);ctx.fill();
+ ctx.fillStyle='#080d0a';ctx.fillRect(x-w*.12,H*.53-h*.55,w*.24,h*.55);
+ ctx.fillStyle='#667263';ctx.fillRect(x-w*.34,H*.53-h*.72,w*.14,h*.22);ctx.fillRect(x+w*.2,H*.53-h*.72,w*.14,h*.22);
+ ctx.globalAlpha=1;
+}
+function drawMonster(){
+ const p=project(monster.x,monster.y);if(!p)return;
+ if(lineBlocked(player.x,player.y,monster.x,monster.y))return;
+ const scale=H/(p.d*1.05),x=p.sx,base=H*.54+scale*.12;
+ ctx.globalAlpha=clamp(1-p.d/85,.12,1);
+ ctx.fillStyle='#080a08';
+ // unnaturally tall, narrow body and crooked limbs
+ ctx.beginPath();ctx.ellipse(x,base-scale*2.25,scale*.22,scale*.55,.05,0,TAU);ctx.fill();
+ ctx.fillRect(x-scale*.16,base-scale*2.05,scale*.32,scale*1.75);
+ ctx.beginPath();ctx.moveTo(x-scale*.12,base-scale*1.75);ctx.lineTo(x-scale*.5,base-scale*.2);ctx.lineTo(x-scale*.39,base-scale*.12);ctx.lineTo(x,base-scale*1.2);ctx.fill();
+ ctx.beginPath();ctx.moveTo(x+scale*.12,base-scale*1.8);ctx.lineTo(x+scale*.46,base-scale*.35);ctx.lineTo(x+scale*.35,base-scale*.25);ctx.lineTo(x,base-scale*1.2);ctx.fill();
+ ctx.fillRect(x-scale*.13,base-scale*.35,scale*.1,scale*.5);ctx.fillRect(x+scale*.04,base-scale*.35,scale*.1,scale*.5);
+ ctx.fillStyle='#c3cdb1';ctx.shadowColor='#d9e4c6';ctx.shadowBlur=scale*.08;
+ ctx.fillRect(x-scale*.09,base-scale*2.35,scale*.055,scale*.035);ctx.fillRect(x+scale*.04,base-scale*2.35,scale*.055,scale*.035);
+ ctx.shadowBlur=0;ctx.globalAlpha=1;
+}
+function drawItems(){
+ for(const p of parts)if(!p.got){const q=project(p.x,p.y);if(q){let s=clamp(30/q.d,3,14);ctx.fillStyle='#b7d9a0';ctx.shadowColor='#b7e6a4';ctx.shadowBlur=15;ctx.fillRect(q.sx-s/2,H*.56-s,s,s);ctx.shadowBlur=0;}}
+ for(const n of notes)if(!n.got){const q=project(n.x,n.y);if(q){ctx.fillStyle='#d3cba7';ctx.fillRect(q.sx-5,H*.55-10,10,13);}}
+}
+function render(){
+ drawSkyGround();
+ const all=trees.map(t=>({kind:'tree',obj:t,d:Math.hypot(t.x-player.x,t.y-player.y)}));
+ all.push({kind:'church',obj:church,d:Math.hypot(church.x-player.x,church.y-player.y)});
+ all.sort((a,b)=>b.d-a.d);
+ for(const o of all){if(o.kind==='tree')drawTree(o.obj);else drawChurch();}
+ drawItems();drawMonster();
+ // flashlight vignette and VHS overlay
+ if(flash&&battery>0){let g=ctx.createRadialGradient(W/2,H*.56,15,W/2,H*.56,H*.7);g.addColorStop(0,'rgba(220,235,205,.16)');g.addColorStop(1,'rgba(0,0,0,.55)');ctx.fillStyle=g;ctx.fillRect(0,0,W,H);}
+ let fog=ctx.createLinearGradient(0,H*.25,0,H);fog.addColorStop(0,'rgba(185,197,181,.25)');fog.addColorStop(.6,'rgba(100,120,103,.08)');fog.addColorStop(1,'rgba(0,0,0,.2)');ctx.fillStyle=fog;ctx.fillRect(0,0,W,H);
+ ctx.fillStyle='rgba(0,0,0,.14)';ctx.fillRect(0,0,W,5);ctx.fillRect(0,H-5,W,5);
+ for(let i=0;i<500;i++){ctx.fillStyle=Math.random()>.5?'rgba(255,255,255,.035)':'rgba(0,0,0,.06)';ctx.fillRect(Math.random()*W,Math.random()*H,1,1);}
+ ctx.fillStyle='#d9e2d7';ctx.font='15px monospace';ctx.fillText('REC ●',22,30);ctx.font='12px monospace';ctx.fillText('02:17 AM',22,H-20);
+}
+function nearestThing(){
+ for(const p of parts)if(!p.got&&Math.hypot(player.x-p.x,player.y-p.y)<1.6){p.got=true;found++;say('SIGNAL COMPONENT RECOVERED');tone(580,.15);tone(760,.2);document.getElementById('objective').textContent=`SIGNAL PARTS ${found}/3`;return;}
+ for(const n of notes)if(!n.got&&Math.hypot(player.x-n.x,player.y-n.y)<1.5){n.got=true;say(n.text,5);tone(190,.4);return;}
+ if(Math.hypot(player.x-church.x,player.y-church.y)<4){if(found===3)finish(true);else say('THE CHURCH DOOR IS LOCKED. FIND THE THREE PARTS.');}
+}
+function finish(win){if(ended)return;ended=true;running=false;document.getElementById('overlay').style.display='flex';document.getElementById('heading').textContent=win?'THE CHURCH':'LOST IN THE WOODS';document.getElementById('intro').textContent=win?'The door opens. Something inside whispers your name. This is only the beginning.':'The trees fall silent. You are no longer alone.';document.getElementById('start').textContent='PLAY AGAIN';}
+function updateMonster(dt){
+ const d=Math.hypot(player.x-monster.x,player.y-monster.y);
+ modeTimer-=dt;
+ if(modeTimer<=0){
+  const r=Math.random();
+  monsterMode=r<.38?'hide':r<.68?'watch':'stalk';
+  modeTimer=rnd(4,9);
+  if(monsterMode==='watch'&&d>12)say('YOU FEEL SOMETHING WATCHING.',2.5);
+  if(monsterMode==='hide'&&d<25)rustle(.7,.07);
+ }
+ const blockedView=lineBlocked(player.x,player.y,monster.x,monster.y);
+ if(monsterMode==='hide'){
+   // Move laterally toward nearby tree cover, then wait.
+   let nearest=trees.reduce((best,t)=>{let v=Math.hypot(t.x-monster.x,t.y-monster.y);return v<best.v?{t,v}:best;},{v:Infinity});
+   if(nearest.t&&nearest.v>1.2){let dx=nearest.t.x-monster.x,dy=nearest.t.y-monster.y,l=Math.hypot(dx,dy);monster.x+=dx/l*dt*1.8;monster.y+=dy/l*dt*1.8;}
+ }else if(monsterMode==='stalk'||(monsterMode==='watch'&&d<9)){
+   const dx=player.x-monster.x,dy=player.y-monster.y,l=Math.max(.01,Math.hypot(dx,dy));
+   let sp=monster.speed*(d<12?1.18:1);
+   let nx=monster.x+dx/l*sp*dt,ny=monster.y+dy/l*sp*dt;
+   if(!trees.some(t=>Math.hypot(nx-t.x,ny-t.y)<t.r+.4)){monster.x=nx;monster.y=ny;}
+ }
+ if(d<1.05){finish(false);return;}
+ if(d<13&&!blockedView&&Math.random()<dt*.15){tone(rnd(42,75),.8,.035,'sawtooth');}
+}
+function update(dt){
+ if(!running)return;
+ msgTimer-=dt;if(msgTimer<=0)document.getElementById('msg').textContent='';
+ const f=(keys.w||keys.ArrowUp?1:0)-(keys.s||keys.ArrowDown?1:0)-joy.y;
+ const side=(keys.d||keys.ArrowRight?1:0)-(keys.a||keys.ArrowLeft?1:0)+joy.x;
+ const moving=Math.abs(f)+Math.abs(side)>.08,speed=(runHeld||keys.Shift?5.0:2.65)*dt;
+ move((Math.sin(player.a)*f+Math.cos(player.a)*side)*speed,(Math.cos(player.a)*f-Math.sin(player.a)*side)*speed);
+ if(moving){stepTimer-=dt;if(stepTimer<=0){rustle(.16,runHeld?.075:.045);tone(runHeld?58:75,.07,.018,'triangle');stepTimer=runHeld?.29:.48;}}
+ battery=Math.max(0,battery-(flash?.48:0)*dt);if(!battery)flash=false;
+ updateMonster(dt);nearestThing();
+ ambienceTimer-=dt;if(ambienceTimer<=0){let r=Math.random();if(r<.45)rustle(.5,.018);else if(r<.75)tone(rnd(90,180),.5,.012);else{tone(900,.12,.008);setTimeout(()=>tone(650,.2,.008),180);}ambienceTimer=rnd(5,12);}
+ document.getElementById('battery').textContent=`FLASHLIGHT ${Math.floor(battery)}%`;
+ document.getElementById('light').textContent=flash?'LIGHT ON':'LIGHT OFF';
+}
+const keys={};
+addEventListener('keydown',e=>{keys[e.key]=true;if(['ArrowUp','ArrowDown','ArrowLeft','ArrowRight',' '].includes(e.key))e.preventDefault();if(e.key.toLowerCase()==='f')toggleLight();if(e.key==='e')nearestThing();});
+addEventListener('keyup',e=>keys[e.key]=false);
+function toggleLight(){if(battery>0){flash=!flash;tone(flash?300:130,.1,.025);}else say('THE BATTERY IS DEAD.');}
+document.getElementById('light').addEventListener('pointerdown',e=>{e.preventDefault();toggleLight();});
+document.getElementById('sprint').addEventListener('pointerdown',e=>{e.preventDefault();runHeld=true;});
+['pointerup','pointercancel','pointerleave'].forEach(t=>document.getElementById('sprint').addEventListener(t,()=>runHeld=false));
+document.getElementById('use').addEventListener('pointerdown',e=>{e.preventDefault();nearestThing();});
+const joyEl=document.getElementById('joystick'),stick=document.getElementById('stick');
+joyEl.addEventListener('pointerdown',e=>{e.preventDefault();joyId=e.pointerId;joyEl.setPointerCapture(joyId);setJoy(e);});
+joyEl.addEventListener('pointermove',e=>{if(e.pointerId===joyId)setJoy(e);});
+function setJoy(e){let r=joyEl.getBoundingClientRect(),dx=e.clientX-(r.left+r.width/2),dy=e.clientY-(r.top+r.height/2),l=Math.hypot(dx,dy),m=34;if(l>m){dx=dx/l*m;dy=dy/l*m;}joy.x=dx/m;joy.y=dy/m;stick.style.transform=`translate(${dx}px,${dy}px)`;}
+function resetJoy(){joyId=null;joy={x:0,y:0};stick.style.transform='translate(0,0)';}
+joyEl.addEventListener('pointerup',resetJoy);joyEl.addEventListener('pointercancel',resetJoy);
+const look=document.getElementById('look');
+look.addEventListener('pointerdown',e=>{e.preventDefault();lookId=e.pointerId;lastX=e.clientX;look.setPointerCapture(lookId);});
+look.addEventListener('pointermove',e=>{if(e.pointerId!==lookId)return;player.a+= (e.clientX-lastX)*.0048;lastX=e.clientX;});
+look.addEventListener('pointerup',()=>lookId=null);look.addEventListener('pointercancel',()=>lookId=null);
+addEventListener('contextmenu',e=>e.preventDefault());addEventListener('selectstart',e=>e.preventDefault());
+document.getElementById('start').addEventListener('click',()=>{
+ if(ended){location.reload();return;}
+ document.getElementById('overlay').style.display='none';running=true;hasStarted=true;
+ audioStart();if(audio&&audio.state==='suspended')audio.resume();
+ if(screen.orientation?.lock)screen.orientation.lock('landscape').catch(()=>{});
+ say('FIND THE CHURCH. KEEP YOUR EYES OPEN.',4);
+});
+function frame(t){let dt=Math.min((t-last)/1000,.05);last=t;update(dt);render();requestAnimationFrame(frame);}
+initWorld();requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>'''
+path = Path("/mnt/data/dont_look_back_forest.html")
+path.write_text(html, encoding="utf-8")
+print(f"Created {path} ({len(html):,} characters)")
